@@ -1,0 +1,8 @@
+string query
+---
+# Result
+sensor msgs/RegionOfInterest[] boxes
+string[] labels
+
+# Feedback
+string status

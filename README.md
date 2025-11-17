@@ -2,12 +2,19 @@
 
 Agentic Tool calling Dobot Magician with task decomposition
 
-# Virtual Env:
+## Environment: 
+
+### To activate the ROS environment and the Python Venv:
+``` 
+source ./ros_setup.sh
+```
+
+### Virtual Env:
 ``` 
 source .venv/bin/activate
 ```
 
-# Commands:
+## Commands:
 
 1. 
 ```
