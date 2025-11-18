@@ -22,7 +22,9 @@ setup(
         'console_scripts': [
             'image_publisher = final.image_publisher:main',
             'image_subscriber = final.image_subscriber:main',
-            'object_finder = final.object_finder:main'
+            'object_finder = final.object_finder:main',
+            'robot_control = final.robot_control:main',
+            'orchestrator = final.orchestrator:main',
         ],
     },
 )

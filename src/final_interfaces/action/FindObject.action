@@ -1,8 +1,9 @@
+# Goal
 string query
 ---
 # Result
-sensor msgs/RegionOfInterest[] boxes
+sensor_msgs/RegionOfInterest[] boxes
 string[] labels
-
+---
 # Feedback
 string status
