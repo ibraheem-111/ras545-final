@@ -28,14 +28,21 @@ ros2 run final image_subscriber
 
 3. Object finder (Gemini)
 ```
-ros2 run
+ros2 run final object_finder
+```
 
-# New developer setup:
+
+## New developer setup:
 python3.10 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 
-# Now they build
+## Now they build
 source /opt/ros/humble/setup.bash
 colcon build
 source install/setup.bash
+
+## For testing Object Finder:
+```
+ros2 topic pub --once finder_command std_msgs/msg/String "{data: 'Find the red block'}"
+```
