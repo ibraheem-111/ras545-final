@@ -226,7 +226,7 @@ class ObjectFinder(Node):
                 pass
 
         current_frame = self.get_frame()
-        query = goal_handle.query
+        query = goal_handle.request.query
 
         # Publish initial feedback
         feedback_msg = FindObject.Feedback()
