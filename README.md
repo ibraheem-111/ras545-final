@@ -46,3 +46,13 @@ source install/setup.bash
 ```
 ros2 topic pub --once finder_command std_msgs/msg/String "{data: 'Find the red block'}"
 ```
+As an action server
+```
+ros2 action send_goal /find_object final_interfaces/action/FindObject '{ query: "Where are the glasses?" }'
+```
+## For Testing Robot Control 
+
+```
+ros2 action send_goal /move_robot final_interfaces/action/MoveRobot '{x: 0.10, y: 0.20, z: 0.30, r: 0.00, motion_type: "joint"}'
+```
+
