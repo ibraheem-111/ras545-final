@@ -8,6 +8,7 @@ import threading
 import numpy as np
 from final_interfaces.action import FindObject
 from rclpy.action import ActionServer
+import numpy as np
 
 # --- Google AI and Helper Imports ---
 
@@ -33,6 +34,40 @@ from google.genai.types import (
 from google.oauth2 import service_account, credentials
 from PIL import Image as PILImage, ImageColor, ImageDraw
 from pydantic import BaseModel
+
+# # Load camera calibration from numpy files
+CAMERA_MATRIX = np.load('/home/ibraheem/ras545/midterm2/camera_matrix.npy')
+DIST_COEFFS = np.load('/home/ibraheem/ras545/midterm2/dist_coeffs.npy')
+
+# Load calibration points from saved numpy files
+CAMERA_PX_POINTS = np.load('/home/ibraheem/ras545final/camera_points.npy').astype(np.float32)
+ROBOT_MM_POINTS = np.load('/home/ibraheem/ras545final/robot_points.npy').astype(np.float32)
+
+def pixel_to_robot(pixel_x: float, pixel_y: float, correct_distortion: bool = True) -> tuple[float, float]:
+    """Convert camera pixel coordinates to robot coordinates in mm.
+    
+    Args:
+        pixel_x: x-coordinate in camera pixels
+        pixel_y: y-coordinate in camera pixels
+        correct_distortion: whether to apply camera distortion correction
+    
+    Returns:
+        tuple[float, float]: (x, y) coordinates in robot space (mm)
+    """
+    point = np.array([[[pixel_x, pixel_y]]], dtype=np.float32)
+    
+    # Step 1: Apply camera distortion correction if needed
+    if correct_distortion:
+        point = cv2.undistortPoints(point, CAMERA_MATRIX, DIST_COEFFS, P=CAMERA_MATRIX)
+        point = point.reshape(1, 1, 2)
+    
+    # Step 2: Get perspective transform matrix
+    M = cv2.getPerspectiveTransform(CAMERA_PX_POINTS, ROBOT_MM_POINTS)
+    
+    # Step 3: Convert point
+    transformed = cv2.perspectiveTransform(point, M)
+    
+    return tuple(transformed[0][0])
 
 class BoundingBox(BaseModel):
     """
@@ -133,69 +168,6 @@ class ObjectFinder(Node):
             self.config = None
         # --- End Google AI Init ---
 
-    
-    def frame_callback(self, data):
-        """
-        This callback runs for every frame.
-        It just converts and saves the latest frame. No processing.
-        """
-        # self.get_logger().info("Receiving new frame...") # Too noisy, comment out
-        try:
-            cv_frame = self.br.imgmsg_to_cv2(data, 'bgr8')
-            with self.frame_lock:
-                self.latest_frame = cv_frame
-        except Exception as e:
-            self.get_logger().error(f'Failed to convert frame: {e}')
-
-    def find_object(self, query, current_frame) -> list[BoundingBox] | None:
-        try:
-            # 1. Convert cv2 frame (NumPy) to JPEG bytes
-            ret, buffer = cv2.imencode('.jpg', current_frame)
-            if not ret:
-                self.get_logger().error("Failed to encode frame to JPEG.")
-                return
-            image_bytes = buffer.tobytes()
-
-            # 2. Create a GenAI Part from the image bytes
-            image_part = Part(inline_data=Blob(data=image_bytes, mime_type="image/jpeg"))
-            
-            # 3. Get the text query
-            user_query = query
-
-            # 4. Call the model
-            self.get_logger().info("Sending request to Google AI...")
-            response = self.client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=[
-                    image_part,
-                    user_query,
-                ],
-                config=self.config,
-            )
-
-            self.get_logger().info(f"Received response: {response.text}")
-
-            # 5. Plot the results
-            if response.parsed:
-                plot_bounding_boxes(current_frame, response.parsed)
-            else:
-                self.get_logger().info("No objects found or parsed by the model.")
-
-            return response.parsed
-
-        except Exception as e:
-            self.get_logger().error(f"Error during AI processing: {e}")
-
-    def get_frame(self):
-        current_frame = None
-        with self.frame_lock:
-            if self.latest_frame is None:
-                self.get_logger().warning("ObjectFinder triggered but no frame received yet.")
-                return
-            # Make a copy to avoid race conditions while processing
-            current_frame = self.latest_frame.copy()
-        return current_frame
-
     def command_callback(self, msg):
         """
         This callback runs ONLY when a command is received.
@@ -270,6 +242,8 @@ class ObjectFinder(Node):
         # Convert parsed BoundingBox objects into sensor_msgs/RegionOfInterest and labels
         boxes = []
         labels = []
+        x_coords = []
+        y_coords = []
         img_h, img_w = current_frame.shape[:2]
 
         for bbox in result_bboxes:
@@ -283,17 +257,28 @@ class ObjectFinder(Node):
                 # If conversion fails, skip this box
                 continue
 
+            y_center = (y_min + y_max) / 2
+            x_center = (x_min + x_max) / 2
+
+            # Convert pixel coordinates to robot coordinates
+            rx, ry = pixel_to_robot(x_center, y_center, correct_distortion=True)
+            self.get_logger().info(f"Object '{bbox.label}' at pixel ({x_center:.1f}, {y_center:.1f}) -> robot ({rx:.1f} mm, {ry:.1f} mm)")
+
             roi = RegionOfInterest()
             roi.x_offset = max(0, x_min)
             roi.y_offset = max(0, y_min)
             roi.width = max(0, x_max - x_min)
             roi.height = max(0, y_max - y_min)
 
+            x_coords.append(rx)
+            y_coords.append(ry)
             boxes.append(roi)
             labels.append(bbox.label if getattr(bbox, 'label', None) is not None else "")
 
         result_msg.boxes = boxes
         result_msg.labels = labels
+        result_msg.x_coords = x_coords
+        result_msg.y_coords = y_coords
 
         # Final feedback and succeed the goal
         feedback_msg.status = f"Found {len(boxes)} objects"
@@ -309,7 +294,69 @@ class ObjectFinder(Node):
             pass
 
         return result_msg
+    
+    def frame_callback(self, data):
+        """
+        This callback runs for every frame.
+        It just converts and saves the latest frame. No processing.
+        """
+        # self.get_logger().info("Receiving new frame...") # Too noisy, comment out
+        try:
+            cv_frame = self.br.imgmsg_to_cv2(data, 'bgr8')
+            with self.frame_lock:
+                self.latest_frame = cv_frame
+        except Exception as e:
+            self.get_logger().error(f'Failed to convert frame: {e}')
 
+    def find_object(self, query, current_frame) -> list[BoundingBox] | None:
+        try:
+            # 1. Convert cv2 frame (NumPy) to JPEG bytes
+            ret, buffer = cv2.imencode('.jpg', current_frame)
+            if not ret:
+                self.get_logger().error("Failed to encode frame to JPEG.")
+                return
+            image_bytes = buffer.tobytes()
+
+            # 2. Create a GenAI Part from the image bytes
+            image_part = Part(inline_data=Blob(data=image_bytes, mime_type="image/jpeg"))
+            
+            # 3. Get the text query
+            user_query = query
+
+            # 4. Call the model
+            self.get_logger().info("Sending request to Google AI...")
+            response = self.client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=[
+                    image_part,
+                    user_query,
+                ],
+                config=self.config,
+            )
+
+            self.get_logger().info(f"Received response: {response.text}")
+
+            # 5. Plot the results
+            if response.parsed:
+                plot_bounding_boxes(current_frame, response.parsed)
+            else:
+                self.get_logger().info("No objects found or parsed by the model.")
+
+            return response.parsed
+
+        except Exception as e:
+            self.get_logger().error(f"Error during AI processing: {e}")
+
+    def get_frame(self):
+        current_frame = None
+        with self.frame_lock:
+            if self.latest_frame is None:
+                self.get_logger().warning("ObjectFinder triggered but no frame received yet.")
+                return
+            # Make a copy to avoid race conditions while processing
+            current_frame = self.latest_frame.copy()
+        return current_frame
+    
 
 def main(args=None):
     rclpy.init(args=args)
