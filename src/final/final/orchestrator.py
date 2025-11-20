@@ -10,6 +10,7 @@ from final_interfaces.action import FindObject, MoveRobot
 from final_interfaces.msg import Target
 from google import genai
 from google.genai import types as gt
+import time
 
 # --- System Prompt (UPDATED) ---
 SYSTEM_INSTRUCTION = """
@@ -28,8 +29,8 @@ STRICT OPERATIONAL RULES:
 
 CONSTANTS:
 - Z_Movement = 0 
-- Z_Pick_or_Drop = -40
-- Block_Height = 5
+- Z_Pick_or_Drop = -48
+- Block_Height = 10
 - Home = [240, 0, 150]
 
 TRAJECTORY STRUCTURE:
@@ -208,6 +209,7 @@ class Orchestrator(Node):
     def handle_execute_trajectory(self, trajectory):
         try:
             self.get_logger().info(f"Executing Trajectory with {len(trajectory)} steps.")
+            self.get_logger().info(f"Trajectory Details: {trajectory}")
             
             for i, step in enumerate(trajectory):
                 step_type = step["type"]
@@ -219,6 +221,8 @@ class Orchestrator(Node):
                 elif step_type == "suction_command":
                     state = payload.get("state", False)
                     self._run_gripper(state)
+
+                    time.sleep(2)
 
                 elif step_type == "motion_command":
                     success = self._run_move_robot(
