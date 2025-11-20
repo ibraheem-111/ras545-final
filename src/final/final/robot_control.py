@@ -3,7 +3,7 @@ from rclpy.node import Node
 import pydobot
 from pydobot.dobot import MODE_PTP
 from rclpy.action import ActionServer
-from final_interfaces.action import MoveRobot
+from final_interfaces.action import MoveRobot, Gripper, Home
 import glob
 from serial.tools import list_ports
 
@@ -16,6 +16,10 @@ class MockDobot:
         
     def move_to(self, x, y, z, r=0, mode=None):
         print(f"Mock: Moving to x={x:.2f}, y={y:.2f}, z={z:.2f}")
+
+    def grip(self, state: bool):
+        action = "Closing" if state else "Opening"
+        print(f"Mock: {action} gripper")
 
 
 class RobotControl(Node):
@@ -63,6 +67,21 @@ class RobotControl(Node):
             execute_callback=self.execute_callback
         )
 
+        self._action_server_gripper = ActionServer(
+            self,
+            Gripper,
+            'gripper_control',
+            execute_callback=self.grip
+        )
+
+        self._action_server_home = ActionServer(
+            self,
+            Home,
+            'home_robot',
+            execute_callback=self.home
+        )
+
+        # Home the robot on startup 
         self.home()
 
     def home(self):
@@ -73,6 +92,29 @@ class RobotControl(Node):
             self.device.home()
         except Exception as e:
             self.get_logger().error(f"Error homing device: {e}")
+
+    def home_callback(self, goal_handle):
+        self.get_logger().info('Received home goal')
+
+        goal_handle.accepted()
+
+        result = Home.Result()
+
+        # Execute home action
+        try:
+            self.home()
+
+            goal_handle.succeed()
+
+            result.success = True
+            return result
+
+        except Exception as e:
+            self.get_logger().error(f"Error executing home action: {e}")
+            goal_handle.abort()
+
+            result.success = False
+            return result
 
     def move_to_joint_motion(self, x, y, z, r):
         if self.device is None:
@@ -104,53 +146,53 @@ class RobotControl(Node):
         except Exception as e:
             self.get_logger().error(f"Error controlling gripper: {e}")
 
+    def gripper_callback(self, goal_handle):
+        self.get_logger().info('Received gripper goal')
+
+        goal_handle.accepted()
+
+        req = goal_handle.request
+        gripper_state = req.gripper_state
+        result = Gripper.Result()
+
+        try:
+            self.grip(gripper_state)
+            goal_handle.succeed()
+            result.success = True
+            return result
+
+        except Exception as e:
+            self.get_logger().error(f"Error executing gripper action: {e}")
+            goal_handle.abort()
+            result.success = False
+            return result
+
     def execute_callback(self, goal_handle):
         self.get_logger().info('Received move_robot goal')
 
-        # Accept the goal (rclpy version differences)
-        try:
-            goal_handle.accepted()
-        except Exception:
-            try:
-                goal_handle.accept()
-            except Exception:
-                pass
+        goal_handle.accepted()
 
         # Extract request
-        try:
-            req = goal_handle.request
-            x = req.x
-            y = req.y
-            z = req.z
-            r = req.r
-            motion_type = req.motion_type
-        except Exception:
-            self.get_logger().error("Failed to read goal request")
-            try:
-                goal_handle.abort()
-            except Exception:
-                pass
-            result = MoveRobot.Result()
-            result.success = False
-            result.message = "Invalid request"
-            return result
+        req = goal_handle.request
+        x = req.x
+        y = req.y
+        z = req.z
+        r = req.r
+        motion_type = req.motion_type
 
-        # Publish initial feedback if supported
+        # Publish initial feedback
         feedback = MoveRobot.Feedback()
         feedback.status = "Processing"
-        try:
-            goal_handle.publish_feedback(feedback)
-        except Exception:
-            pass
+
+        goal_handle.publish_feedback(feedback)
+
+        result = MoveRobot.Result()
 
         # Check device
         if self.device is None:
             self.get_logger().error("No Dobot device available; aborting goal")
-            try:
-                goal_handle.abort()
-            except Exception:
-                pass
-            result = MoveRobot.Result()
+            
+            goal_handle.abort()
             result.success = False
             result.message = "Device not initialized"
             return result
@@ -163,39 +205,21 @@ class RobotControl(Node):
                 self.move_to_linear_motion(x, y, z, r)
             else:
                 self.get_logger().error('Invalid motion type specified.')
-                try:
-                    goal_handle.abort()
-                except Exception:
-                    pass
-                result = MoveRobot.Result()
+                goal_handle.abort()
                 result.success = False
                 result.message = f"Invalid motion_type: {motion_type}"
                 return result
 
-            # Optionally publish completion feedback
             feedback.status = "Motion commanded"
-            try:
-                goal_handle.publish_feedback(feedback)
-            except Exception:
-                pass
-
-            try:
-                goal_handle.succeed()
-            except Exception:
-                pass
-
-            result = MoveRobot.Result()
+            goal_handle.publish_feedback(feedback)
+            goal_handle.succeed()
             result.success = True
             result.message = "Motion completed / commanded"
             return result
 
         except Exception as e:
             self.get_logger().error(f"Error executing motion: {e}")
-            try:
-                goal_handle.abort()
-            except Exception:
-                pass
-            result = MoveRobot.Result()
+            goal_handle.abort()
             result.success = False
             result.message = f"Exception: {e}"
             return result
