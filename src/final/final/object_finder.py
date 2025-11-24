@@ -8,79 +8,58 @@ import threading
 import numpy as np
 from final_interfaces.action import FindObject
 from rclpy.action import ActionServer
-import numpy as np
+import sys, os
+import time
 
 # --- Google AI and Helper Imports ---
-
-import sys, pkgutil, os
-print("exe:", sys.executable)
-print("first 10 sys.path:")
-for p in sys.path[:10]: print("  ", p)
-
-import google
-print("\ngoogle.__file__:", getattr(google, "__file__", None))
-print("google.__path__:", list(getattr(google, "__path__", [])))
-
 from google import genai
 from google.genai.types import (
     GenerateContentConfig,
     HarmBlockThreshold,
     HarmCategory,
-    HttpOptions,
     Part,
     SafetySetting,
     Blob
 )
-from google.oauth2 import service_account, credentials
 from PIL import Image as PILImage, ImageColor, ImageDraw
 from pydantic import BaseModel
 
-# # Load camera calibration from numpy files
+# --- CONSTANTS ---
+# Use the API key provided
+api_key = os.getenv("GOOGLE_API_KEY")
+MODEL_ID = "gemini-robotics-er-1.5-preview"
+
+# Load camera calibration
 CAMERA_MATRIX = np.load('/home/ibraheem/ras545/midterm2/camera_matrix.npy')
 DIST_COEFFS = np.load('/home/ibraheem/ras545/midterm2/dist_coeffs.npy')
-
-# Load calibration points from saved numpy files
 CAMERA_PX_POINTS = np.load('/home/ibraheem/ras545/camera_points.npy').astype(np.float32)
 ROBOT_MM_POINTS = np.load('/home/ibraheem/ras545/robot_points.npy').astype(np.float32)
 
 def pixel_to_robot(pixel_x: float, pixel_y: float, correct_distortion: bool = True) -> tuple[float, float]:
-    """Convert camera pixel coordinates to robot coordinates in mm.
-    
-    Args:
-        pixel_x: x-coordinate in camera pixels
-        pixel_y: y-coordinate in camera pixels
-        correct_distortion: whether to apply camera distortion correction
-    
-    Returns:
-        tuple[float, float]: (x, y) coordinates in robot space (mm)
-    """
+    """Convert camera pixel coordinates to robot coordinates in mm."""
     point = np.array([[[pixel_x, pixel_y]]], dtype=np.float32)
     
-    # Step 1: Apply camera distortion correction if needed
     if correct_distortion:
         point = cv2.undistortPoints(point, CAMERA_MATRIX, DIST_COEFFS, P=CAMERA_MATRIX)
         point = point.reshape(1, 1, 2)
     
-    # Step 2: Get perspective transform matrix
     M = cv2.getPerspectiveTransform(CAMERA_PX_POINTS, ROBOT_MM_POINTS)
-    
-    # Step 3: Convert point
     transformed = cv2.perspectiveTransform(point, M)
-    
     return tuple(transformed[0][0])
 
-class BoundingBox(BaseModel):
+# --- UPDATED DATA MODEL ---
+class ObjectPoint(BaseModel):
     """
-    Represents a bounding box with its 2D coordinates and associated label.
+    Represents a specific point on an object with its label.
+    Gemini returns points as [y, x] normalized to 0-1000.
     """
-    box_2d: list[int]
+    point: list[int]
     label: str
 
-# Helper function to plot bounding boxes on an image
-def plot_bounding_boxes(image: np.ndarray, bounding_boxes: list[BoundingBox]) -> None:
+# --- UPDATED VISUALIZATION ---
+def plot_points(image: np.ndarray, points: list[ObjectPoint]) -> None:
     """
-    Plots bounding boxes on an image with labels, using PIL.
-    Accepts a CV2 image (NumPy array) in BGR format.
+    Plots points on an image with labels, using PIL.
     """
     # Convert CV2 BGR image to PIL RGB image
     im = PILImage.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
@@ -89,27 +68,29 @@ def plot_bounding_boxes(image: np.ndarray, bounding_boxes: list[BoundingBox]) ->
     draw = ImageDraw.Draw(im)
     colors = list(ImageColor.colormap.keys())
 
-    for i, bbox in enumerate(bounding_boxes):
-        # Scale normalized coordinates (0-1000) to image dimensions
-        abs_y_min = int(bbox.box_2d[0] / 1000 * height)
-        abs_x_min = int(bbox.box_2d[1] / 1000 * width)
-        abs_y_max = int(bbox.box_2d[2] / 1000 * height)
-        abs_x_max = int(bbox.box_2d[3] / 1000 * width)
+    for i, item in enumerate(points):
+        # Normalize coordinates:
+        # Gemini returns 0-1000. We must divide by 1000 and multiply by image size.
+        norm_y = item.point[0]
+        norm_x = item.point[1]
+
+        abs_y = int(norm_y / 1000 * height)
+        abs_x = int(norm_x / 1000 * width)
 
         color = colors[i % len(colors)]
 
-        # Draw the rectangle using the correct (x, y) pairs
-        draw.rectangle(
-            ((abs_x_min, abs_y_min), (abs_x_max, abs_y_max)),
-            outline=color,
-            width=4,
-        )
-        if bbox.label:
-            # Position the text at the top-left corner of the box
-            draw.text((abs_x_min + 8, abs_y_min + 6), bbox.label, fill=color)
+        # Draw the point as a small circle
+        r = 4 
+        draw.ellipse((abs_x - r, abs_y - r, abs_x + r, abs_y + r), fill=color)
 
-    im.show() # Display the image in a new window
+        if item.label:
+            # Position the text near the point
+            draw.text((abs_x + 8, abs_y + 6), item.label, fill=color)
 
+    # Convert back to CV2 for display if needed, or just show
+    im.show() 
+    # Or save it to check later:
+    # im.save("/home/ibraheem/ras545final/debug_output.jpg")
 
 class ObjectFinder(Node):
     def __init__(self):
@@ -122,18 +103,16 @@ class ObjectFinder(Node):
             self.action_callback
         )
         
-        # Subscribes to the raw video feed
         self.subscription = self.create_subscription(
             Image,
             'video_frames',
-            self.frame_callback, # Fast callback to just store the frame
-            10) # Use QoS profile 10
+            self.frame_callback,
+            10)
 
-        # Subscribes to natural language commands
         self.command_subscription = self.create_subscription(
             StringMsg,
             "finder_command",
-            self.command_callback, # Slow callback that runs AI
+            self.command_callback,
             10)
 
         self.br = CvBridge()
@@ -141,22 +120,22 @@ class ObjectFinder(Node):
         self.frame_lock = threading.Lock()
 
         # --- Initialize Google AI Client ---
-        # NOTE: Set your GOOGLE_API_KEY environment variable
         try:
-            self.client = genai.Client(http_options=HttpOptions(api_version="v1"))
+            self.client = genai.Client(api_key=api_key, vertexai=False)
+            
+            # UPDATED SYSTEM INSTRUCTION FOR POINTS
             self.config = GenerateContentConfig(
                 system_instruction="""
-                You're an object detection model for a robot arm's camera.
+                You are an object detection model for a robot arm's camera.
+                The Robot's job is to pick and place coloured blocks.
+                
+                Given an image and a query, identify the object.
+                
+                The answer should follow the JSON format:
+                [{"point": <point>, "label": <label1>}, ...]
 
-The Robot's job is to pick and place coloured blocks on a table.
-
-Given an image from the robot's camera and a text query asking for a specific colored block (e.g., 'red block', 'blue block'),
-
-identify and locate the object in the image.
-
-Return Tight bounding boxes as an array with labels.
-
-Never return masks.
+                The points are in [y, x] format normalized to 0-1000.
+                Only identify items requested in the prompt.
                 """,
                 temperature=0.5,
                 safety_settings=[
@@ -166,158 +145,90 @@ Never return masks.
                     ),
                 ],
                 response_mime_type="application/json",
-                response_schema=list[BoundingBox],
+                response_schema=list[ObjectPoint],
             )
             self.get_logger().info("Google GenAI Client initialized successfully.")
         except Exception as e:
             self.get_logger().error(f"Failed to initialize Google GenAI Client: {e}")
             self.client = None
             self.config = None
-        # --- End Google AI Init ---
 
     def command_callback(self, msg):
-        """
-        This callback runs ONLY when a command is received.
-        It performs the heavy object detection logic.
-        """
-        if self.client is None:
-            self.get_logger().error("GenAI client not initialized. Cannot process command.")
-            return
-
+        if self.client is None: return
         self.get_logger().info(f"ObjectFinder received command: '{msg.data}'")
-        
         current_frame = self.get_frame()
-        
         self.find_object(msg.data, current_frame)
-
-        
 
     def action_callback(self, goal_handle):
         self.get_logger().info("Received action request to find object.")
-        # Accept the incoming goal
-        try:
-            goal_handle.accepted()
-        except Exception:
-            # Some rclpy versions expose `accept` instead of `accepted`.
-            try:
-                goal_handle.accept()
-            except Exception:
-                pass
 
         current_frame = self.get_frame()
         query = goal_handle.request.query
-
         self.get_logger().info(f"Action query: '{query}'")
 
-        # Publish initial feedback
+        # Feedback
         feedback_msg = FindObject.Feedback()
         feedback_msg.status = "Processing"
-        try:
-            goal_handle.publish_feedback(feedback_msg)
-        except Exception:
-            # publish_feedback may raise on some versions if not supported; ignore
-            pass
+        goal_handle.publish_feedback(feedback_msg)
 
-        result_bboxes = self.find_object(query, current_frame)
-
+        result_points = self.find_object(query, current_frame)
         result_msg = FindObject.Result()
 
-        # If the AI didn't return anything, mark goal as aborted and return empty result
-        if not result_bboxes:
-            try:
-                goal_handle.canceled()
-            except Exception:
-                try:
-                    goal_handle.abort()
-                except Exception:
-                    pass
+        if not result_points or current_frame is None:
+            goal_handle.abort()
             result_msg.boxes = []
-            result_msg.labels = []
+            result_msg.x_coords = []
+            result_msg.y_coords = []
             return result_msg
 
-        # If there was no frame to analyze, abort the goal
-        if current_frame is None:
-            try:
-                goal_handle.canceled()
-            except Exception:
-                try:
-                    goal_handle.abort()
-                except Exception:
-                    pass
-            result_msg.boxes = []
-            result_msg.labels = []
-            return result_msg
-
-        # Convert parsed BoundingBox objects into sensor_msgs/RegionOfInterest and labels
         boxes = []
         labels = []
         x_coords = []
         y_coords = []
         img_h, img_w = current_frame.shape[:2]
 
-        for bbox in result_bboxes:
-            # Expect bbox.box_2d = [ymin, xmin, ymax, xmax] in 0..1000 (per plot code)
+        for item in result_points:
+            # 1. Denormalize coordinates [y, x] 0-1000 -> pixels
             try:
-                y_min = int(bbox.box_2d[0] / 1000 * img_h)
-                x_min = int(bbox.box_2d[1] / 1000 * img_w)
-                y_max = int(bbox.box_2d[2] / 1000 * img_h)
-                x_max = int(bbox.box_2d[3] / 1000 * img_w)
+                norm_y = item.point[0]
+                norm_x = item.point[1]
+                
+                pixel_x = int(norm_x / 1000 * img_w)
+                pixel_y = int(norm_y / 1000 * img_h)
             except Exception:
-                # If conversion fails, skip this box
                 continue
 
-            # y_center = (y_min + y_max) / 2
-            # x_center = (x_min + x_max) / 2
-            x_center, y_center = self.get_refined_center(
-                current_frame, x_min, y_min, x_max, y_max
-            )
+            # 2. Convert to Robot Coordinates (using the pixel directly)
+            # We removed the refined_center function as requested.
+            rx, ry = pixel_to_robot(pixel_x, pixel_y, correct_distortion=True)
+            
+            self.get_logger().info(f"Object '{item.label}' at pixel ({pixel_x}, {pixel_y}) -> robot ({rx:.1f} mm, {ry:.1f} mm)")
 
-            # Convert pixel coordinates to robot coordinates
-            rx, ry = pixel_to_robot(x_center, y_center, correct_distortion=True)
-            self.get_logger().info(f"Object '{bbox.label}' at pixel ({x_center:.1f}, {y_center:.1f}) -> robot ({rx:.1f} mm, {ry:.1f} mm)")
-
+            # 3. Create Dummy Bounding Box (RegionOfInterest)
+            # This maintains compatibility with your interface which expects boxes.
+            # We create a small 20x20 box centered on the point.
+            box_size = 20
             roi = RegionOfInterest()
-            roi.x_offset = max(0, x_min)
-            roi.y_offset = max(0, y_min)
-            roi.width = max(0, x_max - x_min)
-            roi.height = max(0, y_max - y_min)
+            roi.x_offset = max(0, int(pixel_x - box_size/2))
+            roi.y_offset = max(0, int(pixel_y - box_size/2))
+            roi.width = box_size
+            roi.height = box_size
 
-            x_coords.append(rx.item())
-            y_coords.append(ry.item())
+            x_coords.append(float(rx))
+            y_coords.append(float(ry))
             boxes.append(roi)
-            labels.append(bbox.label if getattr(bbox, 'label', None) is not None else "")
-
-        self.get_logger().info(f"Result Coordinates: X: {x_coords}, Y: {y_coords}")
-
+            labels.append(item.label if item.label else "object")
 
         result_msg.boxes = boxes
         result_msg.labels = labels
         result_msg.x_coords = x_coords
         result_msg.y_coords = y_coords
 
-        self.get_logger().info(f"Result Coordinates: X: {x_coords}, Y: {y_coords}")
-
-        # Final feedback and succeed the goal
-        feedback_msg.status = f"Found {len(boxes)} objects"
-        try:
-            goal_handle.publish_feedback(feedback_msg)
-        except Exception:
-            pass
-
-        try:
-            goal_handle.succeed()
-        except Exception:
-            # some rclpy versions may use succeed(), others may not; ignore failures here
-            pass
-
+        self.get_logger().info(f"Found {len(boxes)} objects.")
+        goal_handle.succeed()
         return result_msg
     
     def frame_callback(self, data):
-        """
-        This callback runs for every frame.
-        It just converts and saves the latest frame. No processing.
-        """
-        # self.get_logger().info("Receiving new frame...") # Too noisy, comment out
         try:
             cv_frame = self.br.imgmsg_to_cv2(data, 'bgr8')
             with self.frame_lock:
@@ -325,107 +236,46 @@ Never return masks.
         except Exception as e:
             self.get_logger().error(f'Failed to convert frame: {e}')
 
-    def find_object(self, query, current_frame) -> list[BoundingBox] | None:
+    def get_frame(self):
+        # For testing, you seem to be using a static file. 
+        # If you want real camera, uncomment the logic below and comment the imread.
+        
+        # --- STATIC IMAGE MODE ---
+        return cv2.imread("/home/ibraheem/ras545final/test_images/20251120_152041.jpg")
+        
+        # --- REAL CAMERA MODE ---
+        # with self.frame_lock:
+        #     if self.latest_frame is None:
+        #         return None
+        #     return self.latest_frame.copy()
+
+    def find_object(self, query, current_frame) -> list[ObjectPoint] | None:
+        if current_frame is None: return None
         try:
-            # 1. Convert cv2 frame (NumPy) to JPEG bytes
             ret, buffer = cv2.imencode('.jpg', current_frame)
-            if not ret:
-                self.get_logger().error("Failed to encode frame to JPEG.")
-                return
-            image_bytes = buffer.tobytes()
-
-            # 2. Create a GenAI Part from the image bytes
-            image_part = Part(inline_data=Blob(data=image_bytes, mime_type="image/jpeg"))
+            if not ret: return None
             
-            # 3. Get the text query
-            user_query = query
-
-            # 4. Call the model
-            self.get_logger().info("Sending request to Google AI...")
+            self.get_logger().info("Sending request to Gemini...")
             response = self.client.models.generate_content(
-                model="gemini-2.5-flash",
+                model=MODEL_ID,
                 contents=[
-                    image_part,
-                    user_query,
+                    Part(inline_data=Blob(data=buffer.tobytes(), mime_type="image/jpeg")),
+                    query,
                 ],
                 config=self.config,
             )
 
-            self.get_logger().info(f"Received response: {response.text}")
-
-            # 5. Plot the results
             if response.parsed:
-                plot_bounding_boxes(current_frame, response.parsed)
+                # Plot points using the new visualization function
+                plot_points(current_frame, response.parsed)
+                return response.parsed
             else:
-                self.get_logger().info("No objects found or parsed by the model.")
-
-            return response.parsed
+                self.get_logger().info("No objects parsed.")
+                return []
 
         except Exception as e:
-            self.get_logger().error(f"Error during AI processing: {e}")
-
-    def get_frame(self):
-        current_frame = None
-        # with self.frame_lock:
-        #     if self.latest_frame is None:
-        #         self.get_logger().warning("ObjectFinder triggered but no frame received yet.")
-        #         return
-        #     # Make a copy to avoid race conditions while processing
-        #     current_frame = self.latest_frame.copy()
-        current_frame = cv2.imread("/home/ibraheem/ras545final/test_images/20251120_152041.jpg")
-        return current_frame
-    
-    def get_refined_center(self, frame, x_min, y_min, x_max, y_max):
-        """
-        Refines the center by looking for the most 'saturated' (colorful) object
-        inside the bounding box. This ignores wood grain.
-        """
-        # 1. Extract ROI
-        roi = frame[y_min:y_max, x_min:x_max]
-        if roi.size == 0:
-            return (x_min + x_max) / 2, (y_min + y_max) / 2
-
-        # 2. Convert to HSV (Hue, Saturation, Value)
-        # We only care about 'S' (Saturation) - index 1
-        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-        s_channel = hsv[:, :, 1]
-
-        # 3. Thresholding
-        # Otsu's method automatically finds the split between "dull" (wood) and "vibrant" (block)
-        # This creates a binary mask where the block is White and wood is Black
-        _, mask = cv2.threshold(s_channel, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-
-        # 4. Morphology (Clean up noise)
-        # This removes small speckles of noise (like wood knots)
-        kernel = np.ones((5, 5), np.uint8)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-
-        # DEBUG: Uncomment this to save the mask image to check if it works
-        # cv2.imwrite(f'debug_mask_{x_min}.jpg', mask)
-
-        # 5. Find Contours on the MASK
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-        if not contours:
-            self.get_logger().warn("No contours found in refinement. Using box center.")
-            return (x_min + x_max) / 2, (y_min + y_max) / 2
-
-        # 6. Find largest contour (the block)
-        largest_contour = max(contours, key=cv2.contourArea)
-
-        # 7. Calculate Center of Mass
-        M = cv2.moments(largest_contour)
-        if M["m00"] != 0:
-            cX_local = int(M["m10"] / M["m00"])
-            cY_local = int(M["m01"] / M["m00"])
-        else:
-            return (x_min + x_max) / 2, (y_min + y_max) / 2
-
-        # 8. Convert local ROI coords to global image coords
-        final_x = x_min + cX_local
-        final_y = y_min + cY_local
-
-        return final_x, final_y
+            self.get_logger().error(f"AI Processing Error: {e}")
+            return []
 
 def main(args=None):
     rclpy.init(args=args)
