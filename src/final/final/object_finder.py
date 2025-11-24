@@ -40,8 +40,8 @@ CAMERA_MATRIX = np.load('/home/ibraheem/ras545/midterm2/camera_matrix.npy')
 DIST_COEFFS = np.load('/home/ibraheem/ras545/midterm2/dist_coeffs.npy')
 
 # Load calibration points from saved numpy files
-CAMERA_PX_POINTS = np.load('/home/ibraheem/ras545final/camera_points.npy').astype(np.float32)
-ROBOT_MM_POINTS = np.load('/home/ibraheem/ras545final/robot_points.npy').astype(np.float32)
+CAMERA_PX_POINTS = np.load('/home/ibraheem/ras545/camera_points.npy').astype(np.float32)
+ROBOT_MM_POINTS = np.load('/home/ibraheem/ras545/robot_points.npy').astype(np.float32)
 
 def pixel_to_robot(pixel_x: float, pixel_y: float, correct_distortion: bool = True) -> tuple[float, float]:
     """Convert camera pixel coordinates to robot coordinates in mm.
@@ -146,10 +146,17 @@ class ObjectFinder(Node):
             self.client = genai.Client(http_options=HttpOptions(api_version="v1"))
             self.config = GenerateContentConfig(
                 system_instruction="""
-                Return bounding boxes as an array with labels.
-                Never return masks. Limit to 25 objects.
-                If an object is present multiple times, give each object a unique label
-                according to its distinct characteristics (colors, size, position, etc..).
+                You're an object detection model for a robot arm's camera.
+
+The Robot's job is to pick and place coloured blocks on a table.
+
+Given an image from the robot's camera and a text query asking for a specific colored block (e.g., 'red block', 'blue block'),
+
+identify and locate the object in the image.
+
+Return Tight bounding boxes as an array with labels.
+
+Never return masks.
                 """,
                 temperature=0.5,
                 safety_settings=[
@@ -199,6 +206,8 @@ class ObjectFinder(Node):
 
         current_frame = self.get_frame()
         query = goal_handle.request.query
+
+        self.get_logger().info(f"Action query: '{query}'")
 
         # Publish initial feedback
         feedback_msg = FindObject.Feedback()
@@ -257,8 +266,11 @@ class ObjectFinder(Node):
                 # If conversion fails, skip this box
                 continue
 
-            y_center = (y_min + y_max) / 2
-            x_center = (x_min + x_max) / 2
+            # y_center = (y_min + y_max) / 2
+            # x_center = (x_min + x_max) / 2
+            x_center, y_center = self.get_refined_center(
+                current_frame, x_min, y_min, x_max, y_max
+            )
 
             # Convert pixel coordinates to robot coordinates
             rx, ry = pixel_to_robot(x_center, y_center, correct_distortion=True)
@@ -270,15 +282,20 @@ class ObjectFinder(Node):
             roi.width = max(0, x_max - x_min)
             roi.height = max(0, y_max - y_min)
 
-            x_coords.append(rx)
-            y_coords.append(ry)
+            x_coords.append(rx.item())
+            y_coords.append(ry.item())
             boxes.append(roi)
             labels.append(bbox.label if getattr(bbox, 'label', None) is not None else "")
+
+        self.get_logger().info(f"Result Coordinates: X: {x_coords}, Y: {y_coords}")
+
 
         result_msg.boxes = boxes
         result_msg.labels = labels
         result_msg.x_coords = x_coords
         result_msg.y_coords = y_coords
+
+        self.get_logger().info(f"Result Coordinates: X: {x_coords}, Y: {y_coords}")
 
         # Final feedback and succeed the goal
         feedback_msg.status = f"Found {len(boxes)} objects"
@@ -349,14 +366,66 @@ class ObjectFinder(Node):
 
     def get_frame(self):
         current_frame = None
-        with self.frame_lock:
-            if self.latest_frame is None:
-                self.get_logger().warning("ObjectFinder triggered but no frame received yet.")
-                return
-            # Make a copy to avoid race conditions while processing
-            current_frame = self.latest_frame.copy()
+        # with self.frame_lock:
+        #     if self.latest_frame is None:
+        #         self.get_logger().warning("ObjectFinder triggered but no frame received yet.")
+        #         return
+        #     # Make a copy to avoid race conditions while processing
+        #     current_frame = self.latest_frame.copy()
+        current_frame = cv2.imread("/home/ibraheem/ras545final/test_images/20251120_152041.jpg")
         return current_frame
     
+    def get_refined_center(self, frame, x_min, y_min, x_max, y_max):
+        """
+        Refines the center by looking for the most 'saturated' (colorful) object
+        inside the bounding box. This ignores wood grain.
+        """
+        # 1. Extract ROI
+        roi = frame[y_min:y_max, x_min:x_max]
+        if roi.size == 0:
+            return (x_min + x_max) / 2, (y_min + y_max) / 2
+
+        # 2. Convert to HSV (Hue, Saturation, Value)
+        # We only care about 'S' (Saturation) - index 1
+        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+        s_channel = hsv[:, :, 1]
+
+        # 3. Thresholding
+        # Otsu's method automatically finds the split between "dull" (wood) and "vibrant" (block)
+        # This creates a binary mask where the block is White and wood is Black
+        _, mask = cv2.threshold(s_channel, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+        # 4. Morphology (Clean up noise)
+        # This removes small speckles of noise (like wood knots)
+        kernel = np.ones((5, 5), np.uint8)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+
+        # DEBUG: Uncomment this to save the mask image to check if it works
+        # cv2.imwrite(f'debug_mask_{x_min}.jpg', mask)
+
+        # 5. Find Contours on the MASK
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        if not contours:
+            self.get_logger().warn("No contours found in refinement. Using box center.")
+            return (x_min + x_max) / 2, (y_min + y_max) / 2
+
+        # 6. Find largest contour (the block)
+        largest_contour = max(contours, key=cv2.contourArea)
+
+        # 7. Calculate Center of Mass
+        M = cv2.moments(largest_contour)
+        if M["m00"] != 0:
+            cX_local = int(M["m10"] / M["m00"])
+            cY_local = int(M["m01"] / M["m00"])
+        else:
+            return (x_min + x_max) / 2, (y_min + y_max) / 2
+
+        # 8. Convert local ROI coords to global image coords
+        final_x = x_min + cX_local
+        final_y = y_min + cY_local
+
+        return final_x, final_y
 
 def main(args=None):
     rclpy.init(args=args)
