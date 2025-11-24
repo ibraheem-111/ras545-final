@@ -12,27 +12,43 @@ from google import genai
 from google.genai import types as gt
 import time
 
-MODEL_ID = "gemini-2.5-flash"
+MODEL_ID = "gemini-2.5-pro"
 
 # --- System Prompt (UPDATED) ---
+
 SYSTEM_INSTRUCTION = """
-You are a precise Robot Orchestrator. You have NO chat personality. You DO NOT speak. You ONLY execute tool calls.
+You are a precise Robot Orchestrator. 
 
 YOUR GOAL:
 1. Find coordinates for every object mentioned.
-2. Immediately execute the physical movement plan.
+2. Execute the physical movement plan.
+
+WORKSPACE DESCRIPTION:
+- The robot operates on a flat surface with a top-down camera view.
+- The blocks closest to you have relatively lower X values.
+- The blocks furthest from you have relatively higher X values.
+- The blocks to your left have higher Y values.
+- The blocks to your right have lower Y values.
 
 STRICT OPERATIONAL RULES:
-- Phase 1 (Scouting): Call `find_object` for every object in the prompt.
-- Phase 2 (Execution): AS SOON as you receive the coordinates from Phase 1, your VERY NEXT output MUST be `execute_trajectory`.
-- **DO NOT** output text summaries like "I have found the objects."
-- **DO NOT** ask for confirmation.
-- **DO NOT** stop between phases.
+- Phase 1 (Scouting): Identify ALL objects referenced in the user's prompt. 
+    - Call `find_object` **EXACTLY ONCE**. 
+    - The query argument MUST be a single string describing ALL items (e.g., "blue block and red block"). 
+    - **DO NOT** make multiple function calls for detection.
+- Phase 2 (Decision): 
+    - Review the labels returned by `find_object`.
+    - If the user asked for a singular object (e.g., "pick the blue block") but the tool returned MULTIPLE variations (e.g., "blue_block_1" and "blue_block_2"), **DO NOT EXECUTE**.
+    - Use spatial reasoning based upon coordinate values and workspace description to determine which object to pick (e.g., closest to robot, leftmost, etc.).
+    - If clarification is needed (e.g., multiple objects found but only one requested), ASK the user a direct question specifying the options.
+- Phase 3 (Execution): 
+    - If the object is unique or specific (e.g., "blue_block_1"), execute the trajectory immediately.
+    - **DO NOT** output text summaries like "I have found the objects" if you are proceeding to execution. Only speak if you need clarification.
 
 CONSTANTS:
 - Z_Movement = 0 
 - Z_Pick_or_Drop = -47
-- Block_Height = 10
+- Block_Height = 15
+- Block_Offset = 15
 - Home = [240, 0, 150]
 
 TRAJECTORY STRUCTURE:
@@ -50,23 +66,12 @@ LOGIC (Pick A, Place on B):
 7. Suction: Open (false)
 8. Motion: Up (Z_Movement, Linear)
 9. Home
-
-LOGIC (Pick A, Place next to B):
-1. Motion: Above A (Z_Movement, Joint)
-2. Motion: Down to A (Z_Pick_or_Drop, Linear)
-3. Suction: Close (true)
-4. Motion: Up (Z_Movement, Linear)
-5. Motion: Next to Above B (Z_Movement, Joint)
-6. Motion: Down to B (Z_Pick_or_Drop, Linear)
-7. Suction: Open (false)
-8. Motion: Up (Z_Movement, Linear)
-9. Home
 """
 
-# --- Tool Definitions ---
+# --- Tool Definitions (UPDATED) ---
 FIND_OBJECT_FN = {
     "name": "find_object",
-    "description": "Locates an object. Returns robot coordinates (x, y).",
+    "description": "Locates ALL referenced objects in the image. Input a SINGLE query string describing all items (e.g., 'red block and blue block').",
     "parameters": {
         "type": "object",
         "properties": {"query": {"type": "string"}},
@@ -122,6 +127,9 @@ class Orchestrator(Node):
         self._action_done_event = threading.Event()
         self._current_result = None
 
+        # Setup Publisher for questions back to user
+        self.feedback_pub = self.create_publisher(StringMsg, "robot_feedback", 10)
+
         try:
             self.client = genai.Client(vertexai=True, location="us-central1")
             self.chat = self.client.chats.create(
@@ -153,13 +161,13 @@ class Orchestrator(Node):
                     if part.function_call
                 ]
 
-                # If no function calls found, check if it's just text.
+                # If no function calls found, check if it's just text (Clarification Question)
                 if not function_calls:
                     text_resp = response.text or ""
-                    self.get_logger().info(f"Agent Text (No Tools): {text_resp}")
-                    # Loop Fix: If model is chatting, we force break. 
-                    # Ideally, prompt prevents this.
-                    break
+                    if text_resp:
+                        self.get_logger().info(f"ROBOT QUESTION: {text_resp}")
+                        self.feedback_pub.publish(StringMsg(data=text_resp))
+                    break 
                 
                 self.get_logger().info(f"Processing {len(function_calls)} tool calls...")
                 
@@ -215,14 +223,15 @@ class Orchestrator(Node):
             rx = self._current_result.x_coords[i] 
             ry = self._current_result.y_coords[i]
             label = self._current_result.labels[i]
+            # The label here will now contain the unique ID (e.g. blue_block_1)
             found.append(f"Found {label} at x={rx:.1f}, y={ry:.1f}")
         
+        # We join all found items in one string so the orchestrator knows about all of them at once
         return {"info": "; ".join(found)}
 
     def handle_execute_trajectory(self, trajectory):
         try:
             self.get_logger().info(f"Executing Trajectory with {len(trajectory)} steps.")
-            self.get_logger().info(f"Trajectory Details: {trajectory}")
             
             for i, step in enumerate(trajectory):
                 step_type = step["type"]
@@ -234,7 +243,6 @@ class Orchestrator(Node):
                 elif step_type == "suction_command":
                     state = payload.get("state", False)
                     self._run_gripper(state)
-
                     time.sleep(2)
 
                 elif step_type == "motion_command":
