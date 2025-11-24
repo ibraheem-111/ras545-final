@@ -56,3 +56,8 @@ ros2 action send_goal /find_object final_interfaces/action/FindObject '{ query: 
 ros2 action send_goal /move_robot final_interfaces/action/MoveRobot '{x: 0.10, y: 0.20, z: 0.30, r: 0.00, motion_type: "joint"}'
 ```
 
+
+## For testing orchestrator
+```
+ros2 topic pub --once /central_query std_msgs/String "{data: 'Pick up the bottle of lotion and place it next to the empty coke bottle'}"
+```

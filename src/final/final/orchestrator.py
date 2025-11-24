@@ -12,6 +12,8 @@ from google import genai
 from google.genai import types as gt
 import time
 
+MODEL_ID = "gemini-2.5-flash"
+
 # --- System Prompt (UPDATED) ---
 SYSTEM_INSTRUCTION = """
 You are a precise Robot Orchestrator. You have NO chat personality. You DO NOT speak. You ONLY execute tool calls.
@@ -29,7 +31,7 @@ STRICT OPERATIONAL RULES:
 
 CONSTANTS:
 - Z_Movement = 0 
-- Z_Pick_or_Drop = -48
+- Z_Pick_or_Drop = -47
 - Block_Height = 10
 - Home = [240, 0, 150]
 
@@ -45,6 +47,17 @@ LOGIC (Pick A, Place on B):
 4. Motion: Up (Z_Movement, Linear)
 5. Motion: Above B (Z_Movement, Joint)
 6. Motion: Down to B (Z_Pick_or_Drop + Block_Height + 5, Linear)
+7. Suction: Open (false)
+8. Motion: Up (Z_Movement, Linear)
+9. Home
+
+LOGIC (Pick A, Place next to B):
+1. Motion: Above A (Z_Movement, Joint)
+2. Motion: Down to A (Z_Pick_or_Drop, Linear)
+3. Suction: Close (true)
+4. Motion: Up (Z_Movement, Linear)
+5. Motion: Next to Above B (Z_Movement, Joint)
+6. Motion: Down to B (Z_Pick_or_Drop, Linear)
 7. Suction: Open (false)
 8. Motion: Up (Z_Movement, Linear)
 9. Home
@@ -112,7 +125,7 @@ class Orchestrator(Node):
         try:
             self.client = genai.Client(vertexai=True, location="us-central1")
             self.chat = self.client.chats.create(
-                model="gemini-2.5-flash",
+                model=MODEL_ID,
                 config=gt.GenerateContentConfig(
                     system_instruction=SYSTEM_INSTRUCTION,
                     tools=TOOLS,

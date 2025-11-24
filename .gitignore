@@ -5,3 +5,7 @@ log
 ros_setup.sh
 build.sh
 *.pyc
+*.jpg
+*.npy
+test.py
+test_notebook.ipynb
