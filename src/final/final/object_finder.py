@@ -25,9 +25,8 @@ from PIL import Image as PILImage, ImageColor, ImageDraw
 from pydantic import BaseModel
 
 # --- CONSTANTS ---
-# Use the API key provided
 api_key = os.getenv("GOOGLE_API_KEY")
-MODEL_ID = "gemini-robotics-er-1.5-preview"
+MODEL_ID = "gemini-2.0-flash" 
 
 # Load camera calibration
 CAMERA_MATRIX = np.load('/home/ibraheem/ras545/midterm2/camera_matrix.npy')
@@ -47,7 +46,7 @@ def pixel_to_robot(pixel_x: float, pixel_y: float, correct_distortion: bool = Tr
     transformed = cv2.perspectiveTransform(point, M)
     return tuple(transformed[0][0])
 
-# --- UPDATED DATA MODEL ---
+# --- DATA MODEL ---
 class ObjectPoint(BaseModel):
     """
     Represents a specific point on an object with its label.
@@ -56,12 +55,11 @@ class ObjectPoint(BaseModel):
     point: list[int]
     label: str
 
-# --- UPDATED VISUALIZATION ---
+# --- UPDATED VISUALIZATION (Fixes Temp File Issue) ---
 def plot_points(image: np.ndarray, points: list[ObjectPoint]) -> None:
     """
-    Plots points on an image with labels, using PIL.
+    Plots points on an image with labels and SAVES to a static file.
     """
-    # Convert CV2 BGR image to PIL RGB image
     im = PILImage.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
     
     width, height = im.size
@@ -70,7 +68,6 @@ def plot_points(image: np.ndarray, points: list[ObjectPoint]) -> None:
 
     for i, item in enumerate(points):
         # Normalize coordinates:
-        # Gemini returns 0-1000. We must divide by 1000 and multiply by image size.
         norm_y = item.point[0]
         norm_x = item.point[1]
 
@@ -87,10 +84,16 @@ def plot_points(image: np.ndarray, points: list[ObjectPoint]) -> None:
             # Position the text near the point
             draw.text((abs_x + 8, abs_y + 6), item.label, fill=color)
 
-    # Convert back to CV2 for display if needed, or just show
-    im.show() 
-    # Or save it to check later:
-    # im.save("/home/ibraheem/ras545final/debug_output.jpg")
+    # --- FIX START ---
+    # Instead of im.show() which uses flaky temp files, we save to a specific path.
+    # Open this file in VS Code/Image Viewer to see the result.
+    output_path = "/home/ibraheem/ras545final/debug_detected_objects.jpg"
+    try:
+        im.save(output_path)
+        print(f"Visual debug saved to: {output_path}")
+    except Exception as e:
+        print(f"Could not save debug image: {e}")
+    # --- FIX END ---
 
 class ObjectFinder(Node):
     def __init__(self):
@@ -123,7 +126,7 @@ class ObjectFinder(Node):
         try:
             self.client = genai.Client(api_key=api_key, vertexai=False)
             
-            # UPDATED SYSTEM INSTRUCTION FOR POINTS
+            # UPDATED SYSTEM INSTRUCTION
             self.config = GenerateContentConfig(
                 system_instruction="""
                 You are an object detection model for a robot arm's camera.
@@ -131,11 +134,14 @@ class ObjectFinder(Node):
                 
                 Given an image and a query, identify the object.
                 
+                CRITICAL RULE:
+                If there are MULTIPLE instances of the requested object (e.g., multiple blue blocks),
+                you MUST label them uniquely with a suffix number (e.g., "blue_block_1", "blue_block_2").
+                
                 The answer should follow the JSON format:
                 [{"point": <point>, "label": <label1>}, ...]
 
                 The points are in [y, x] format normalized to 0-1000.
-                Only identify items requested in the prompt.
                 """,
                 temperature=0.5,
                 safety_settings=[
@@ -188,7 +194,6 @@ class ObjectFinder(Node):
         img_h, img_w = current_frame.shape[:2]
 
         for item in result_points:
-            # 1. Denormalize coordinates [y, x] 0-1000 -> pixels
             try:
                 norm_y = item.point[0]
                 norm_x = item.point[1]
@@ -198,15 +203,11 @@ class ObjectFinder(Node):
             except Exception:
                 continue
 
-            # 2. Convert to Robot Coordinates (using the pixel directly)
-            # We removed the refined_center function as requested.
             rx, ry = pixel_to_robot(pixel_x, pixel_y, correct_distortion=True)
             
             self.get_logger().info(f"Object '{item.label}' at pixel ({pixel_x}, {pixel_y}) -> robot ({rx:.1f} mm, {ry:.1f} mm)")
 
-            # 3. Create Dummy Bounding Box (RegionOfInterest)
-            # This maintains compatibility with your interface which expects boxes.
-            # We create a small 20x20 box centered on the point.
+            # Create Dummy Bounding Box
             box_size = 20
             roi = RegionOfInterest()
             roi.x_offset = max(0, int(pixel_x - box_size/2))
@@ -237,9 +238,6 @@ class ObjectFinder(Node):
             self.get_logger().error(f'Failed to convert frame: {e}')
 
     def get_frame(self):
-        # For testing, you seem to be using a static file. 
-        # If you want real camera, uncomment the logic below and comment the imread.
-        
         # --- STATIC IMAGE MODE ---
         return cv2.imread("/home/ibraheem/ras545final/test_images/20251120_152041.jpg")
         
