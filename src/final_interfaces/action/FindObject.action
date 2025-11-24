@@ -4,6 +4,8 @@ string query
 # Result
 sensor_msgs/RegionOfInterest[] boxes
 string[] labels
+float32[] x_coords
+float32[] y_coords
 ---
 # Feedback
 string status

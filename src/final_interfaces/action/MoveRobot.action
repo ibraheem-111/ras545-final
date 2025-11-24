@@ -1,12 +1,17 @@
 # Goal
-float32 x
-float32 y
-float32 z
-float32 r
-string motion_type # 'joint' or 'linear'
+int32 CMD_HOME = 1
+int32 CMD_MOVE = 2
+int32 CMD_GRIP = 3
+
+int32 command
+Target target       # Nested object from the msg folder
+bool gripper_state
+
 ---
 # Result
 bool success
+string message
+
 ---
 # Feedback
 string status

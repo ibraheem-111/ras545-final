@@ -1,0 +1,5 @@
+float32 x
+float32 y
+float32 z
+float32 r
+string motion_type # 'joint' or 'linear'
