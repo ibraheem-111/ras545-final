@@ -37,7 +37,7 @@ python3.10 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 
-## Now they build
+## How to build
 source /opt/ros/humble/setup.bash
 colcon build
 source install/setup.bash
