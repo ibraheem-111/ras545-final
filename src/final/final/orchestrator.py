@@ -33,7 +33,8 @@ WORKSPACE DESCRIPTION:
 STRICT OPERATIONAL RULES:
 - Phase 1 (Scouting): Identify ALL objects referenced in the user's prompt. 
     - Call `find_object` **EXACTLY ONCE**. 
-    - The query argument MUST be a single string describing ALL items (e.g., "blue block and red block"). 
+    - The query argument MUST be a single string describing ALL items (e.g., "blue blocks and red blocks"). 
+    - Do not include any directive language (e.g., "left", "right") in the query.
     - **DO NOT** make multiple function calls for detection.
 - Phase 2 (Decision): 
     - Review the labels returned by `find_object`.

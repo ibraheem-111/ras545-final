@@ -48,7 +48,7 @@ ros2 topic pub --once finder_command std_msgs/msg/String "{data: 'Find the red b
 ```
 As an action server
 ```
-ros2 action send_goal /find_object final_interfaces/action/FindObject '{ query: "Where are the glasses?" }'
+ros2 action send_goal /find_object final_interfaces/action/FindObject '{ query: "Where is the packing tape?" }'
 ```
 ## For Testing Robot Control 
 
@@ -59,5 +59,8 @@ ros2 action send_goal /move_robot final_interfaces/action/MoveRobot '{x: 0.10, y
 
 ## For testing orchestrator
 ```
-ros2 topic pub --once /central_query std_msgs/String "{data: 'Pick up the bottle of lotion and place it next to the empty coke bottle'}"
+ros2 topic pub --once /central_query std_msgs/String "{data: 'Pick up the yellow block closest to you and place it on the blue block'}"
+```
+```
+ros2 topic pub --once /central_query std_msgs/String "{data: 'Pick up the yellow block closest to you and place it to the right of the red block to your right'}"
 ```

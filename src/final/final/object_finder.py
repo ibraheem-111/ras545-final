@@ -25,7 +25,8 @@ from pydantic import BaseModel
 
 # --- CONSTANTS ---
 api_key = os.getenv("GOOGLE_API_KEY")
-MODEL_ID = "gemini-robotics-er-1.5-preview" 
+# MODEL_ID = "gemini-robotics-er-1.5-preview"
+MODEL_ID = "gemini-2.5-pro" 
 
 # Load camera calibration
 CAMERA_MATRIX = np.load('/home/ibraheem/ras545/midterm2/camera_matrix.npy')
@@ -132,7 +133,7 @@ class ObjectFinder(Node):
                 YOUR TASK: Locate the GEOMETRIC CENTER (Centroid) of the requested objects.
                 
                 INSTRUCTIONS:
-                1. Identify the object requested.
+                1. Identify the object or objects requested.
                 2. Return the coordinates of the EXACT CENTER of the object's top surface.
                 3. Do NOT point to the edges, corners, or shadows. Point to the absolute middle.
                 4. Label distinct items uniquely with numbers (e.g., "blue_block_1", "blue_block_2").
